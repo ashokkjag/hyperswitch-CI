@@ -245,7 +245,7 @@ impl PaymentAttemptInterface for MockDb {
             tax_amount: payment_attempt.tax_amount,
             payment_method_id: payment_attempt.payment_method_id,
             payment_method: payment_attempt.payment_method,
-            connector_transaction_id: payment_attempt.connector_transaction_id,
+            connector_transaction_id: None,
             capture_method: payment_attempt.capture_method,
             capture_on: payment_attempt.capture_on,
             confirm: payment_attempt.confirm,
@@ -263,6 +263,8 @@ impl PaymentAttemptInterface for MockDb {
             payment_experience: payment_attempt.payment_experience,
             payment_method_type: payment_attempt.payment_method_type,
             payment_method_data: payment_attempt.payment_method_data,
+            business_sub_label: payment_attempt.business_sub_label,
+            straight_through_algorithm: payment_attempt.straight_through_algorithm,
         };
         payment_attempts.push(payment_attempt.clone());
         Ok(payment_attempt)
@@ -376,7 +378,7 @@ mod storage {
                         tax_amount: payment_attempt.tax_amount,
                         payment_method_id: payment_attempt.payment_method_id.clone(),
                         payment_method: payment_attempt.payment_method,
-                        connector_transaction_id: payment_attempt.connector_transaction_id.clone(),
+                        connector_transaction_id: None,
                         capture_method: payment_attempt.capture_method,
                         capture_on: payment_attempt.capture_on,
                         confirm: payment_attempt.confirm,
@@ -394,6 +396,10 @@ mod storage {
                         payment_experience: payment_attempt.payment_experience.clone(),
                         payment_method_type: payment_attempt.payment_method_type.clone(),
                         payment_method_data: payment_attempt.payment_method_data.clone(),
+                        business_sub_label: payment_attempt.business_sub_label.clone(),
+                        straight_through_algorithm: payment_attempt
+                            .straight_through_algorithm
+                            .clone(),
                     };
 
                     let field = format!("pa_{}", created_attempt.attempt_id);

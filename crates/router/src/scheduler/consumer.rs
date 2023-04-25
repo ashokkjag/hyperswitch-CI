@@ -5,12 +5,13 @@ use std::{
     sync::{self, atomic},
 };
 
-use common_utils::signals::{get_allowed_signals, oneshot};
+use common_utils::signals::get_allowed_signals;
 use error_stack::{IntoReport, ResultExt};
 use futures::future;
 use redis_interface::{RedisConnectionPool, RedisEntryId};
 use router_env::{instrument, tracing};
 use time::PrimitiveDateTime;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{
@@ -36,6 +37,8 @@ pub fn valid_business_statuses() -> Vec<&'static str> {
 pub async fn start_consumer(
     state: &AppState,
     settings: sync::Arc<settings::SchedulerSettings>,
+    workflow_selector: workflows::WorkflowSelectorFn,
+    (tx, mut rx): (mpsc::Sender<()>, mpsc::Receiver<()>),
 ) -> CustomResult<(), errors::ProcessTrackerError> {
     use std::time::Duration;
 
@@ -57,13 +60,12 @@ pub async fn start_consumer(
         })
         .into_report()
         .attach_printable("Failed while creating a signals handler")?;
-    let (sx, mut rx) = oneshot::channel();
     let handle = signal.handle();
-    let task_handle = tokio::spawn(common_utils::signals::signal_handler(signal, sx));
+    let task_handle = tokio::spawn(common_utils::signals::signal_handler(signal, tx));
 
     loop {
         match rx.try_recv() {
-            Err(oneshot::error::TryRecvError::Empty) => {
+            Err(mpsc::error::TryRecvError::Empty) => {
                 interval.tick().await;
 
                 // A guard from env to disable the consumer
@@ -78,13 +80,14 @@ pub async fn start_consumer(
                         logger::error!(%err);
                     },
                     sync::Arc::clone(&consumer_operation_counter),
+                    workflow_selector,
                 ));
             }
-            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
+            Ok(()) | Err(mpsc::error::TryRecvError::Disconnected) => {
                 logger::debug!("Awaiting shutdown!");
+                rx.close();
                 shutdown_interval.tick().await;
                 let active_tasks = consumer_operation_counter.load(atomic::Ordering::Acquire);
-
                 match active_tasks {
                     0 => {
                         logger::info!("Terminating consumer");
@@ -108,6 +111,7 @@ pub async fn start_consumer(
 pub async fn consumer_operations(
     state: &AppState,
     settings: &settings::SchedulerSettings,
+    workflow_selector: workflows::WorkflowSelectorFn,
 ) -> CustomResult<(), errors::ProcessTrackerError> {
     let stream_name = settings.stream.clone();
     let group_name = settings.consumer.consumer_group.clone();
@@ -135,7 +139,7 @@ pub async fn consumer_operations(
         pt_utils::add_histogram_metrics(&pickup_time, task, &stream_name);
 
         metrics::TASK_CONSUMED.add(&metrics::CONTEXT, 1, &[]);
-        let runner = pt_utils::runner_from_task(task)?;
+        let runner = workflow_selector(task)?.ok_or(errors::ProcessTrackerError::UnexpectedFlow)?;
         handler.push(tokio::task::spawn(start_workflow(
             state.clone(),
             task.clone(),
@@ -190,21 +194,21 @@ pub async fn fetch_consumer_tasks(
 }
 
 // Accept flow_options if required
-#[instrument(skip(state), fields(workflow_id))]
+#[instrument(skip(state, runner), fields(workflow_id))]
 pub async fn start_workflow(
     state: AppState,
     process: storage::ProcessTracker,
     _pickup_time: PrimitiveDateTime,
-    runner: workflows::PTRunner,
+    runner: Box<dyn ProcessTrackerWorkflow>,
 ) {
     tracing::Span::current().record("workflow_id", Uuid::new_v4().to_string());
-    workflows::perform_workflow_execution(&state, process, runner).await
+    run_executor(&state, process, runner).await
 }
 
-pub async fn run_executor<'a>(
-    state: &'a AppState,
+pub async fn run_executor(
+    state: &AppState,
     process: storage::ProcessTracker,
-    operation: &(impl ProcessTrackerWorkflow + Send + Sync),
+    operation: Box<dyn ProcessTrackerWorkflow>,
 ) {
     let output = operation.execute_workflow(state, process.clone()).await;
     match output {

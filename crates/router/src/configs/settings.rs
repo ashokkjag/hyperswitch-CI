@@ -10,7 +10,7 @@ use config::{Environment, File};
 use external_services::kms;
 use redis_interface::RedisSettings;
 pub use router_env::config::{Log, LogConsole, LogFile, LogTelemetry};
-use serde::{Deserialize, Deserializer};
+use serde::{de::Error, Deserialize, Deserializer};
 
 use crate::{
     core::errors::{ApplicationError, ApplicationResult},
@@ -62,6 +62,35 @@ pub struct Settings {
     pub api_keys: ApiKeys,
     #[cfg(feature = "kms")]
     pub kms: kms::KmsConfig,
+    #[cfg(feature = "s3")]
+    pub file_upload_config: FileUploadConfig,
+    pub tokenization: TokenizationConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(transparent)]
+pub struct TokenizationConfig(pub HashMap<String, PaymentMethodTokenFilter>);
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PaymentMethodTokenFilter {
+    #[serde(deserialize_with = "pm_deser")]
+    pub payment_method: HashSet<storage_models::enums::PaymentMethod>,
+    pub long_lived_token: bool,
+}
+
+fn pm_deser<'a, D>(
+    deserializer: D,
+) -> Result<HashSet<storage_models::enums::PaymentMethod>, D::Error>
+where
+    D: Deserializer<'a>,
+{
+    let value = <String>::deserialize(deserializer)?;
+    value
+        .trim()
+        .split(',')
+        .map(storage_models::enums::PaymentMethod::from_str)
+        .collect::<Result<_, _>>()
+        .map_err(D::Error::custom)
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -156,8 +185,15 @@ where
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct Secrets {
+    #[cfg(not(feature = "kms"))]
     pub jwt_secret: String,
+    #[cfg(not(feature = "kms"))]
     pub admin_api_key: String,
+
+    #[cfg(feature = "kms")]
+    pub kms_encrypted_jwt_secret: String,
+    #[cfg(feature = "kms")]
+    pub kms_encrypted_admin_api_key: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -255,19 +291,24 @@ pub struct Connectors {
     pub bluesnap: ConnectorParams,
     pub braintree: ConnectorParams,
     pub checkout: ConnectorParams,
+    pub coinbase: ConnectorParams,
     pub cybersource: ConnectorParams,
     pub dlocal: ConnectorParams,
     pub fiserv: ConnectorParams,
+    pub forte: ConnectorParams,
     pub globalpay: ConnectorParams,
     pub klarna: ConnectorParams,
     pub mollie: ConnectorParams,
     pub multisafepay: ConnectorParams,
+    pub nexinets: ConnectorParams,
     pub nuvei: ConnectorParams,
+    pub opennode: ConnectorParams,
+    pub payeezy: ConnectorParams,
     pub paypal: ConnectorParams,
     pub payu: ConnectorParams,
     pub rapyd: ConnectorParams,
     pub shift4: ConnectorParams,
-    pub stripe: ConnectorParams,
+    pub stripe: ConnectorParamsWithFileUploadUrl,
     pub worldline: ConnectorParams,
     pub worldpay: ConnectorParams,
     pub trustpay: ConnectorParamsWithMoreUrls,
@@ -287,6 +328,13 @@ pub struct ConnectorParams {
 pub struct ConnectorParamsWithMoreUrls {
     pub base_url: String,
     pub base_url_bank_redirects: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct ConnectorParamsWithFileUploadUrl {
+    pub base_url: String,
+    pub base_url_file_upload: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -348,6 +396,16 @@ pub struct ApiKeys {
     pub hash_key: String,
 }
 
+#[cfg(feature = "s3")]
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct FileUploadConfig {
+    /// The AWS region to send file uploads
+    pub region: String,
+    /// The AWS s3 bucket to send file uploads
+    pub bucket_name: String,
+}
+
 impl Settings {
     pub fn new() -> ApplicationResult<Self> {
         Self::with_config_path(None)
@@ -359,8 +417,8 @@ impl Settings {
         // 1. Defaults from the implementation of the `Default` trait.
         // 2. Values from config file. The config file accessed depends on the environment
         //    specified by the `RUN_ENV` environment variable. `RUN_ENV` can be one of
-        //    `Development`, `Sandbox` or `Production`. If nothing is specified for `RUN_ENV`,
-        //    `/config/Development.toml` file is read.
+        //    `development`, `sandbox` or `production`. If nothing is specified for `RUN_ENV`,
+        //    `/config/development.toml` file is read.
         // 3. Environment variables prefixed with `ROUTER` and each level separated by double
         //    underscores.
         //
@@ -426,7 +484,26 @@ impl Settings {
         self.kms
             .validate()
             .map_err(|error| ApplicationError::InvalidConfigurationValueError(error.into()))?;
-
+        #[cfg(feature = "s3")]
+        self.file_upload_config.validate()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod payment_method_deserialization_test {
+    #![allow(clippy::unwrap_used)]
+    use serde::de::{
+        value::{Error as ValueError, StrDeserializer},
+        IntoDeserializer,
+    };
+
+    use super::*;
+
+    #[test]
+    fn test_pm_deserializer() {
+        let deserializer: StrDeserializer<'_, ValueError> = "wallet,card".into_deserializer();
+        let test_pm = pm_deser(deserializer);
+        assert!(test_pm.is_ok())
     }
 }
