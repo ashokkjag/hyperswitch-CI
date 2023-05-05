@@ -5,8 +5,8 @@ on:
     branches:
       - main
 
-  schedule:
-    - cron: "5 0 * * *"
+#  schedule:
+#    - cron: "5 0 * * *"
 
   merge_group:
     types:
